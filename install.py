@@ -5,9 +5,64 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+
+
+def hook_settings(client, entry):
+    command = [sys.executable, '-B', str(entry), '--client', client]
+    if client == 'claude':
+        return {'type': 'command', 'command': command[0], 'args': command[1:],
+                'timeout': 460, 'onFailure': 'block'}
+    return {'type': 'command', 'command': shlex.join(command), 'timeout': 460,
+            'statusMessage': '药引本地输入与定时交接', 'additionalContextLimit': 0}
+
+
+def install_hook(client, entry):
+    if sys.platform != 'darwin':
+        raise RuntimeError('药引本地输入入口目前仅支持 macOS')
+    if client == 'claude':
+        version = subprocess.run(['claude', '--version'], check=True, capture_output=True,
+                                 text=True).stdout.split()[0]
+        if tuple(map(int, version.split('.'))) < (2, 1, 295):
+            raise RuntimeError('Claude Code 至少需要 2.1.295，旧版无法在 hook 失败时阻止提交')
+        path = Path.home() / '.claude/settings.json'
+    else:
+        features = subprocess.run(['codex', 'features', 'list'], check=True,
+                                  capture_output=True, text=True).stdout
+        if not re.search(r'(?m)^hooks\s+\S+\s+true\s*$', features):
+            raise RuntimeError('当前 Codex 未启用原生 hooks，未更改客户端功能开关')
+        path = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'hooks.json'
+    before = path.read_text() if path.exists() else None
+    config = json.loads(before) if before is not None else {}
+    if config.get('disableAllHooks'):
+        raise RuntimeError('客户端已禁用全部 hooks，保留原设置')
+    wanted = hook_settings(client, entry)
+    groups = config.setdefault('hooks', {}).setdefault('UserPromptSubmit', [])
+    own = [hook for group in groups for hook in group.get('hooks', [])
+           if 'entry_hook.py' in json.dumps(hook)]
+    if own and own != [wanted]:
+        raise RuntimeError('已有不同的药引入口 hook，未覆盖')
+    if not own:
+        groups.append({'hooks': [wanted]})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if (path.read_text() if path.exists() else None) != before:
+            raise RuntimeError('hook 配置同时发生变化，未写入，请重试')
+        destination = path.resolve()
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                    dir=destination.parent, prefix='.yaoyin-hook-', delete=False) as output:
+                temporary = Path(output.name)
+                output.write(json.dumps(config, ensure_ascii=False, indent=2) + '\n')
+            os.replace(temporary, destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    print(client + '：药引本地输入 hook 已安装，只接受不带任务的启动命令')
 
 
 def skill_locations(client):
@@ -90,7 +145,10 @@ def main():
     parser = argparse.ArgumentParser(description='为 Codex / Claude Code 注册药引 MCP')
     parser.add_argument('--client', choices=['codex', 'claude', 'both'], default='both')
     parser.add_argument('--skills-only', action='store_true', help='仅安装工作流 skill，保留已有 MCP 配置')
+    parser.add_argument('--entry-only', action='store_true', help='安装入口 hook 与 skill，保留已有 MCP 配置')
     args = parser.parse_args()
+    if args.skills_only and args.entry_only:
+        parser.error('--skills-only 与 --entry-only 不能同时使用')
     server = Path(__file__).resolve().with_name('server.py')
     skill = server.parent / 'skills/yaoyin'
     clients = ['codex', 'claude'] if args.client == 'both' else [args.client]
@@ -99,8 +157,10 @@ def main():
     if any(not executable for executable in executables.values()):
         parser.error('请先安装所选客户端的官方 CLI，并使其位于 PATH 中')
     for client in clients:
-        if not args.skills_only:
+        if not args.skills_only and not args.entry_only:
             install(client, executables[client], server)
+        if not args.skills_only:
+            install_hook(client, server.with_name('entry_hook.py'))
         install_skill(client, skill)
 
 

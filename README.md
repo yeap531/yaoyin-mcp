@@ -1,26 +1,30 @@
 # 药引 MCP
 
-让自有模型先处理任务，Codex 或 Claude Code 在原会话中继续完成。本地 `stdio MCP`，不代理官方模型流量，不替换客户端的登录方式。
+让自有模型先处理任务，再由 Codex 或 Claude Code 在原会话中继续完成。本地 `stdio MCP`，不代理官方模型流量，不替换官方登录。
 
-提供配套 `yaoyin` skill：调用后先让自有模型处理任务，再由原客户端检查结果、继续执行并验证。也可单独手动调用 MCP。Skill 不强制接管所有消息，不包含精确 5 分钟计时或 `/model` 切换。外部模型只生成文本结果；读写代码、运行命令仍由原客户端处理。
+隐私入口使用提交前 hook：在客户端只发送不含任务的 `$yaoyin` 或 `/yaoyin`，真实任务在 macOS 本地对话框填写。任务与模型成果在本地提交满 300 秒后，才作为 hook 上下文一次性加入原会话。不要把真实任务写在启动命令后面。
 
 ```text
-Codex / Claude Code 原会话
-          ↓ 显式工具参数
-     本地药引 MCP
-          ↓ 本机代理 + HTTPS
-     你配置的模型 API
-          ↓ 原生工具结果
-Codex / Claude Code 在原会话中继续
+原生会话只发送空命令
+          ↓ UserPromptSubmit hook
+药引本地输入框：填写真实任务
+          ↓ 本地 stdio MCP → 本机代理 + HTTPS → 自有模型 API
+任务与回答保留在本地，满 300 秒才交接
+          ↓ hook additionalContext：原任务 + 完整文本回答
+Codex / Claude Code 在原会话中继续执行和验证
 ```
 
-## 环境
+## 环境与边界
 
-macOS 或 Linux，Python 3.9+，`/usr/bin/curl`，以及需要接入的官方 `codex` 或 `claude` CLI。服务只使用 Python 标准库，无需安装 Python 依赖。Windows 尚未适配。
+隐私入口目前支持 macOS，Python 3.9+、`/usr/bin/curl`、系统 `osascript`，以及官方 `codex` 或 `claude` CLI。Claude Code 至少需要 2.1.295，Codex 需要支持并启用原生 hooks。本服务只有 Python 标准库依赖。基础 MCP 也可在 Linux 手动注册；Linux 和 Windows 的本地输入入口尚未适配。
+
+外部模型只生成文本，不具备原客户端的文件和命令工具。一次 API 请求最多 300 秒；提前返回时只在本地等待交接点，不重复调用或添加提示词，也不声称模型持续执行了 5 分钟。上游超时、空回答、取消或交接超限时不提交任务和成果。
+
+交接包含本地输入原文和 API 返回的完整 `content`，不导出隐藏推理或原生内部模型状态。最大任务 64 KB，交接内容最大 256 KB，超过限制直接阻止，不静默截断。Claude Code 会把超过 10,000 字符的 hook 内容保存为原生输出文件并提供预览；skill 要求先沿客户端明确提供的本轮文件路径完整读取，再继续任务。该文件只会在交接点之后产生，不通过搜索临时目录恢复任务。
 
 ## 配置 API
 
-将 `config.example.json` 的字段填入 `~/.config/yaoyin-mcp/config.json`。真实配置放在源码目录之外，目录权限须为 `700`，文件权限须为 `600`。已经有配置时保留原文件。
+将 `config.example.json` 的字段填入 `~/.config/yaoyin-mcp/config.json`。真实配置放在源码目录之外，目录权限为 `700`，文件权限为 `600`。已有配置时保留原文件。
 
 ```sh
 umask 077
@@ -28,18 +32,16 @@ mkdir -p ~/.config/yaoyin-mcp
 chmod 700 ~/.config/yaoyin-mcp
 ```
 
-配置字段：
-
 | 字段 | 要求 |
 | --- | --- |
-| `endpoint` | OpenAI-compatible `https://…/chat/completions` 地址，仅 HTTPS 默认端口，不含 URL 凭据、查询参数或片段 |
+| `endpoint` | OpenAI-compatible `https://…/chat/completions` 地址，仅默认端口，不含 URL 凭据、查询参数或片段 |
 | `model` | 服务提供的模型 ID |
 | `api_key` | 该服务专用密钥，仅保存在私有配置中 |
 | `proxy` | 本机 `http://127.0.0.1:端口` 代理，必须明确配置 |
 
-服务在启动后的每次调用中读取这份配置。修改配置不用更换官方登录。
+服务每次调用时读取配置，不改官方登录。
 
-## 接入 Codex 和 Claude Code
+## 安装到两端
 
 在保留的源码目录执行：
 
@@ -47,79 +49,78 @@ chmod 700 ~/.config/yaoyin-mcp
 python3 install.py --client both
 ```
 
-也可分别使用 `--client codex` 或 `--client claude`。安装器使用客户端原生 CLI 注册名为 `yaoyin` 的用户级 MCP，并安装配套 skill。执行入口是当前 Python 和本目录的 `server.py`，skill 目录链接到本仓库的 `skills/yaoyin`，因此安装后请保留源码目录。它不安装全局软件，不改模型供应商、官方登录或工具审批规则；遇到已有的不同同名 MCP 或 skill 配置会停止。
+也可使用 `--client codex` 或 `--client claude`。安装器注册用户级 `yaoyin` MCP，安装本地输入 hook 和配套 skill；保留已有其他配置、工具审批和官方登录。同名配置有冲突时停止，不覆盖。
 
-已经接好 MCP 时，只补装 skill：
-
-```sh
-python3 install.py --client both --skills-only
-```
-
-两边的单工具超时均设为 130 秒，略长于服务内部的 120 秒 API 请求限制。Codex 的这项设置只写入 `[mcp_servers.yaoyin]`；Claude Code 使用该服务独立的 `timeout` 字段。
-
-验证配置：
+已经装好 MCP 时只更新入口和 skill：
 
 ```sh
-codex mcp get yaoyin --json
-claude mcp get yaoyin
+python3 install.py --client both --entry-only
 ```
 
-在客户端新会话中用 `/mcp` 检查连接，然后调用工作流 skill：
+`--skills-only` 只安装 skill 链接，不安装 hook，不能单独启用隐私入口。
+
+两端共用仓库的 `skills/yaoyin/SKILL.md`，安装后请保留源码目录。Codex 链接到 `~/.codex/skills/yaoyin`（自定义 `CODEX_HOME` 时随之变化）和 `~/.agents/skills/yaoyin`；Claude Code 链接到 `~/.claude/skills/yaoyin`。
+
+Codex 的入口写入 `~/.codex/hooks.json`；Claude Code 写入 `~/.claude/settings.json` 的 `hooks.UserPromptSubmit`。单 hook 超时为 460 秒，留出本地输入的 120 秒和药引阶段的 300 秒。Claude Code 使用 `onFailure: block`；Codex 保留原来的 hooks 功能开关，不擅自启用。
+
+安装后在新会话加载并完成客户端自己的 hook 信任确认；不需要退出官方账号。当前已打开的会话能否动态加载取决于客户端版本。安装器不会关闭或重启应用。
+
+## 使用
+
+只发送空命令：
 
 ```text
-Codex：$yaoyin 帮我完成这个任务……
-Claude Code：/yaoyin 帮我完成这个任务……
+Codex：$yaoyin
+Claude Code：/yaoyin
 ```
 
-两端共用一份 `skills/yaoyin/SKILL.md`。Codex 同时链接到应用的技能目录 `~/.codex/skills/yaoyin`（自定义 `CODEX_HOME` 时随之变化）和标准发现目录 `~/.agents/skills/yaoyin`；Claude Code 使用 `~/.claude/skills/yaoyin`。这些入口均指向同一份源文件，不维护多份不同的流程。
+在随后弹出的本地输入框填写真实任务并提交。从本地提交时开始计时，满 5 分钟后原会话收到任务和回答，skill 继续执行并验证。输入框 2 分钟未提交会取消，可用空命令重试。多行任务可以粘贴到输入框。
 
-Skill 先原样发送任务与必要上下文，不把 skill 的工作流指令拼到外部模型输入中；取得结果后留在当前原生会话里执行和验证。它可被客户端根据描述自动选择，但 skill 不能保证每条普通消息都强制触发。工具不可用或 API 失败时会明确报告，不改用其他 API 或伪造阶段成果。
+在药引阶段取消时，不交接尚未发布的任务和成果。没有本轮交接时，skill 不从历史或文件猜任务，不补调 API，不伪造成功。普通消息不触发药引，skill 关闭 Codex 的隐式调用。
 
-已有会话是否能动态加载取决于客户端版本；无需登出官方账号。首次调用是否要求确认，遵循客户端原来的权限设置。
+## 隐私保证的范围
 
-## 工具接口与原生上下文
+该入口保护的是在药引本地输入框中新填写的任务及其回答：交接前不写入 hook 的 stdout、stderr、工作目录或日志；MCP 只通过匿名管道接收任务。它不自动读取历史、项目、附件、官方凭据或钥匙串。
 
-`ask_model` 接受：
+这个范围有明确前提：真实任务没有提前出现在原生聊天、历史、附件或自动上下文里。已有会话仍由客户端正常维护，hook 无法撤回已经发送的内容，也不阻止客户端其他联网。
+
+Codex 0.162.1 的 hook 在崩溃或超时后可能继续发送原生提交，因此绝不能用带正文的 `$yaoyin 任务` 充当隐私输入。空命令方案在这种失败下只暴露启动命令；正文尚未进入提交链路。健康的 hook 会拒绝带正文命令，但这只是防误用，不能替代上述边界。Claude Code 的 `onFailure: block` 会在启动失败或超时时阻止提交。
+
+- 请求只连接私有配置里的一个固定 HTTPS 端点，工具参数不能覆盖地址、模型、请求头或密钥。
+- 外部 API 必须经过配置的回环代理，禁用 `NO_PROXY` 绕过，不直连、不重定向、不使用备用服务，保留 TLS 校验。
+- MCP 不监听端口，官方模型请求不经过本服务。MCP 子进程不继承客户端认证环境。
+- 密钥经 curl stdin 传递，不放在 argv 或子进程环境中。上游错误正文不返回客户端。包含服务自身密钥的输入或回答会被阻止。
+- API 请求正文短暂保留在私有配置目录的 `600` 临时文件中，正常结束或取消时删除，不写调用日志。
+
+操作系统被入侵、同用户恶意进程、强制终止残留和上游数据处理不在本工具可控制范围内，不承诺绝对零泄漏。代理不可用时直接失败，不要关闭 TLS 校验。
+
+## 基础 MCP 接口
+
+手动调用 `ask_model` 的参数：
 
 ```json
-{
-  "messages": [{"role": "user", "content": "任务原文"}],
-  "max_output_tokens": 4096
-}
+{"messages": [{"role": "user", "content": "任务原文"}], "max_output_tokens": 4096}
 ```
 
-`role` 只允许 `user` 或 `assistant`，`content` 为文本，输出上限可选 64 至 8192。服务原样发送这些消息，不添加 system 或 user 指令，不生成额外交接提示词。成功后文本与模型 ID 作为 MCP 工具结果返回，主会话仍由客户端原生维护。
+`role` 仅支持 `user` / `assistant`，输出上限可选 64 至 8192。服务原样发送消息，不添加 system 或 user 指令。手动调用会先经过主模型，不属于隐私入口。
 
-MCP 不会自动获得完整会话或内部模型状态。要交给外部模型的任务和上下文须通过工具参数明确传入；服务不读取项目、会话记录、官方凭据或钥匙串，也不运行用户命令。
-
-## 数据与安全边界
-
-- 只连接本机私有配置里的单一 HTTPS 端点。工具调用者不能覆盖地址、模型、请求头或密钥。
-- 外部请求必须经过配置的回环代理；禁用 `NO_PROXY` 绕过，不直连、不跟随重定向、不切换备用服务，保留 TLS 证书校验。
-- 不监听网络端口；Codex / Claude 的官方请求不经过本服务。
-- 密钥经 curl 标准输入传递，不放入命令参数或子进程环境。不会把上游错误正文回传给客户端。
-- 请求正文仅在私有配置目录中的 `600` 临时文件里短暂保留，调用结束或正常取消时删除；不写调用日志。输入或回答包含服务自身密钥时会阻止传递。
-- 只有显式工具参数会发送到配置的 API。不要传入不愿交给该服务的内容。操作系统被入侵、同用户恶意进程、强制终止残留和上游数据处理仍有风险，不承诺绝对零泄漏。
-
-如果本机代理未运行，调用会直接失败。请自行恢复代理，不要通过关闭 TLS 校验解决连接问题。
+普通 MCP 注册保留 120 秒 API 上限及客户端 130 秒工具超时。入口启动独立本地 MCP，使用 `server.py --handoff` 将 API 上限设为 300 秒，不修改普通工具超时。
 
 ## 检查与移除
 
-无需真实凭据、无需外网的安全回归检查：
+无需真实凭据、无需外网的回归检查：
 
 ```sh
 python3 -B -m unittest discover -s tests -v
 ```
 
-移除客户端连接不会更改官方登录：
+移除连接不影响官方登录：
 
 ```sh
 codex mcp remove yaoyin
 claude mcp remove --scope user yaoyin
 ```
 
-如需移除 skill，只删除对应发现目录中的 `yaoyin` 符号链接，保留仓库中的源文件。仅移除 MCP 连接不会自动移除 skill。
+移除入口时，只从各端 `hooks.UserPromptSubmit` 删除命令指向本仓库 `entry_hook.py` 的条目，保留其他 hooks。移除 skill 时只删除发现目录的 `yaoyin` 符号链接，保留源码。移除 MCP 不会自动移除 hook 或 skill。
 
-原生接入依据：[Codex MCP 文档](https://developers.openai.com/codex/mcp)、[Claude Code MCP 文档](https://code.claude.com/docs/en/mcp)、[Codex skills 文档](https://developers.openai.com/codex/skills)、[Claude Code skills 文档](https://code.claude.com/docs/en/skills)。
-
-采用 MIT License。
+原生接入依据：[Codex MCP](https://developers.openai.com/codex/mcp)、[Claude Code MCP](https://code.claude.com/docs/en/mcp)、[Codex hooks](https://learn.chatgpt.com/docs/hooks)、[Claude Code hooks](https://code.claude.com/docs/en/hooks)。采用 MIT License。

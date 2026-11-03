@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 CONFIG = Path.home() / '.config/yaoyin-mcp/config.json'
 MAX_INPUT = 4 * 1024 * 1024
+REQUEST_TIMEOUT = 120
 VERSIONS = ('2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25')
 TOOL = {
     'name': 'ask_model',
@@ -92,7 +93,7 @@ def validate(arguments, model):
     return body
 
 
-def call_api(arguments):
+def call_api(arguments, timeout=120):
     config = read_config()
     body = validate(arguments, config['model'])
     api_key = config['api_key']
@@ -109,7 +110,7 @@ def call_api(arguments):
             '/usr/bin/curl', '--disable', '--config', '-',
             '--proxy', config['proxy'], '--noproxy', '', '--proto', '=https',
             '--proto-redir', '=https', '--max-redirs', '0',
-            '--connect-timeout', '10', '--max-time', '120',
+            '--connect-timeout', '10', '--max-time', str(timeout),
             '--silent', '--show-error', '--max-filesize', '16777216',
             '--header', 'Content-Type: application/json', '--request', 'POST',
             '--data-binary', '@' + request_path,
@@ -119,7 +120,7 @@ def call_api(arguments):
                                    stderr=subprocess.PIPE, start_new_session=True,
                                    env={'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8'})
         try:
-            stdout, _ = process.communicate(headers.encode(), timeout=125)
+            stdout, _ = process.communicate(headers.encode(), timeout=timeout + 5)
         except subprocess.TimeoutExpired:
             raise ApiError('API 请求超时，未切换到其他目标')
         if process.returncode:
@@ -171,7 +172,7 @@ def dispatch(request):
         if params.get('name') != TOOL['name']:
             raise ValueError('未知工具')
         try:
-            return call_api(params.get('arguments', {}))
+            return call_api(params.get('arguments', {}), timeout=REQUEST_TIMEOUT)
         except (ValueError, ApiError) as exc:
             return {'isError': True, 'content': [{'type': 'text', 'text': str(exc)}]}
     raise ValueError('不支持的方法')
@@ -210,4 +211,9 @@ def main():
 
 
 if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='药引 stdio MCP')
+    parser.add_argument('--handoff', action='store_true', help='本地入口使用，API 请求上限 300 秒')
+    if parser.parse_args().handoff:
+        REQUEST_TIMEOUT = 300
     main()

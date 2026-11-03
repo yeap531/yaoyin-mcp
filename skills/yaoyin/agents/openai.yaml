@@ -1,10 +1,10 @@
 interface:
   display_name: "药引工作流"
-  short_description: "先用自有模型处理任务，再由 Codex 在原生会话中继续执行并完成验证"
+  short_description: "空命令打开药引本地输入，五分钟后在原生会话接手并完成任务"
 dependencies:
   tools:
     - type: "mcp"
       value: "yaoyin"
       description: "调用用户配置的模型 API，取得阶段成果"
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false
