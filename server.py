@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""本地 stdio MCP；仅将显式工具参数发送到固定 Qwen API。"""
+"""本地 stdio MCP；仅将显式消息发送到用户配置的固定 API。"""
 import json
 import os
+import http.client
 from pathlib import Path
 import re
 import signal
-import subprocess
+import socket
+import ssl
+import threading
+import time
 import sys
-import tempfile
+import runtime
+import storage
 from urllib.parse import urlsplit
 
 
-CONFIG = Path.home() / '.config/yaoyin-mcp/config.json'
+CONFIG = runtime.config_path()
 MAX_INPUT = 4 * 1024 * 1024
 REQUEST_TIMEOUT = 120
 VERSIONS = ('2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25')
 TOOL = {
     'name': 'ask_model',
-    'description': '调用用户配置的模型 API，按 messages 原文生成回答。仅发送显式工具参数；不自动读取项目、会话历史或官方凭据，不运行命令。结果返回当前 Claude 会话。',
+    'description': '调用用户配置的模型 API，按 messages 原文生成回答。仅发送显式工具参数；不自动读取项目、会话历史或官方凭据，不运行命令。结果返回当前原生会话。',
     'inputSchema': {
         'type': 'object', 'additionalProperties': False,
         'properties': {
@@ -38,15 +43,39 @@ class ApiError(Exception):
     pass
 
 
+class ProxiedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('请求已到期')
+        self.timeout = remaining
+        http.client.HTTPConnection.connect(self)
+        hostname = self._tunnel_host or self.host
+        # 先保存 SSL socket 再握手，计时器才能取消正在进行的 TLS 操作。
+        secure = self._context.wrap_socket(self.sock, server_hostname=hostname,
+                                           do_handshake_on_connect=False)
+        self.sock = secure
+        self.active_socket = secure
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('请求已到期')
+        secure.settimeout(remaining)
+        secure.do_handshake()
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('请求已到期')
+        secure.settimeout(remaining)
+
+
 def read_config():
-    if CONFIG.is_symlink() or not CONFIG.is_file():
-        raise ApiError('配置必须是当前用户拥有的普通文件')
-    info = CONFIG.stat()
-    if info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ApiError('配置文件必须由当前用户拥有，权限为 600')
-    if CONFIG.parent.stat().st_mode & 0o077:
-        raise ApiError('私有配置目录权限必须为 700')
-    config = json.loads(CONFIG.read_text())
+    try:
+        storage.check_private(CONFIG)
+    except (OSError, RuntimeError, ValueError):
+        raise ApiError('私有配置权限或路径无效') from None
+    return validate_config(json.loads(CONFIG.read_text(encoding='utf-8')))
+
+
+def validate_config(config):
     if not isinstance(config, dict) or set(config) != {'endpoint', 'model', 'api_key', 'proxy'}:
         raise ApiError('配置必须包含 endpoint、model、api_key、proxy')
     if not all(isinstance(value, str) for value in config.values()):
@@ -99,36 +128,43 @@ def call_api(arguments, timeout=120):
     api_key = config['api_key']
     if api_key.encode() in body:
         raise ApiError('工具输入包含服务密钥，已阻止发送')
-    headers = 'header = "Authorization: Bearer ' + api_key + '"\n'
-    process = None
-    request_path = None
+    endpoint = urlsplit(config['endpoint'])
+    proxy = urlsplit(config['proxy'])
     try:
-        fd, request_path = tempfile.mkstemp(prefix='.yaoyin-request-', dir=CONFIG.parent)
-        with os.fdopen(fd, 'wb') as output:
-            output.write(body)
-        command = [
-            '/usr/bin/curl', '--disable', '--config', '-',
-            '--proxy', config['proxy'], '--noproxy', '', '--proto', '=https',
-            '--proto-redir', '=https', '--max-redirs', '0',
-            '--connect-timeout', '10', '--max-time', str(timeout),
-            '--silent', '--show-error', '--max-filesize', '16777216',
-            '--header', 'Content-Type: application/json', '--request', 'POST',
-            '--data-binary', '@' + request_path,
-            '--write-out', '\n%{http_code}', config['endpoint']]
-        # 不继承 Claude 的认证变量、代理绕过规则或用户 curl 配置。
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, start_new_session=True,
-                                   env={'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8'})
-        try:
-            stdout, _ = process.communicate(headers.encode(), timeout=timeout + 5)
-        except subprocess.TimeoutExpired:
+        import certifi
+        context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        context = ssl.create_default_context()
+    # 只连接明确指定的回环代理；http.client 不读取环境代理或登录凭据。
+    connection = ProxiedHTTPSConnection(proxy.hostname, proxy.port,
+                                         timeout=timeout, context=context)
+    connection.deadline = time.monotonic() + timeout
+    connection.set_tunnel(endpoint.hostname, 443)
+    expired = threading.Event()
+    def abort():
+        expired.set()
+        active = connection.sock or getattr(connection, 'active_socket', None)
+        if active is not None:
+            try:
+                active.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        connection.close()
+    timer = threading.Timer(timeout, abort)
+    timer.daemon = True
+    timer.start()
+    response = None
+    try:
+        connection.request('POST', endpoint.path, body=body, headers={
+            'Content-Type': 'application/json', 'Authorization': 'Bearer ' + api_key})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ApiError('API 返回 HTTP ' + str(response.status) + '；未重定向或回退')
+        payload = response.read(16 * 1024 * 1024 + 1)
+        if expired.is_set():
             raise ApiError('API 请求超时，未切换到其他目标')
-        if process.returncode:
-            raise ApiError('API 连接失败，curl 状态 ' + str(process.returncode) + '；未直连或回退')
-        payload, separator, code = stdout.rpartition(b'\n')
-        if not separator or code != b'200':
-            status = code.decode('ascii', errors='replace') if separator else '未知'
-            raise ApiError('API 返回 HTTP ' + status + '；未重定向或回退')
+        if len(payload) > 16 * 1024 * 1024:
+            raise ApiError('API 返回内容超过限制')
         try:
             result = json.loads(payload)
             answer = result['choices'][0]['message']['content']
@@ -140,20 +176,13 @@ def call_api(arguments, timeout=120):
             raise ApiError('API 结果包含服务密钥，已阻止返回')
         return {'content': [{'type': 'text', 'text': answer}],
                 'structuredContent': {'model': config['model'], 'answer': answer}}
+    except (OSError, http.client.HTTPException):
+        raise ApiError('API 连接失败或超时；未直连、重定向或回退') from None
     finally:
-        try:
-            if process is not None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=0.05)
-                except subprocess.TimeoutExpired:
-                    pass
-        finally:
-            if request_path is not None:
-                Path(request_path).unlink(missing_ok=True)
+        timer.cancel()
+        if response is not None:
+            response.close()
+        connection.close()
 
 
 def dispatch(request):
@@ -163,7 +192,7 @@ def dispatch(request):
         version = params.get('protocolVersion')
         return {'protocolVersion': version if version in VERSIONS else VERSIONS[-1],
                 'capabilities': {'tools': {}},
-                'serverInfo': {'name': 'yaoyin-mcp', 'version': '0.1.0'}}
+                'serverInfo': {'name': 'yaoyin-mcp', 'version': runtime.VERSION}}
     if method == 'ping':
         return {}
     if method == 'tools/list':

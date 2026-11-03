@@ -1,0 +1,120 @@
+name: Portable packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+            target: macos-arm64
+            executable: yaoyin
+          - runner: macos-15-intel
+            architecture: x64
+            target: macos-x64
+            executable: yaoyin
+          - runner: windows-2022
+            architecture: x64
+            target: windows-x64
+            executable: yaoyin.exe
+          - runner: ubuntu-22.04
+            architecture: x64
+            target: linux-x64
+            executable: yaoyin
+          - runner: ubuntu-22.04-arm
+            architecture: arm64
+            target: linux-arm64
+            executable: yaoyin
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux graphical libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk tk-dev xvfb xauth
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12.12'
+          architecture: ${{ matrix.architecture }}
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install pinned build dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-build.txt
+      - name: Check source behavior
+        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: Check source GUI on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python tests/gui_smoke.py
+      - name: Check source GUI on desktop runners
+        if: runner.os != 'Linux'
+        run: python tests/gui_smoke.py
+      - name: Build native bundle
+        run: python packaging/build.py --expect-target ${{ matrix.target }}
+      - name: Check packaged executable on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python tests/smoke_packaged.py dist/yaoyin-0.2.0-${{ matrix.target }}/${{ matrix.executable }} --gui
+      - name: Check packaged executable on desktop runners
+        if: runner.os != 'Linux'
+        run: python tests/smoke_packaged.py dist/yaoyin-0.2.0-${{ matrix.target }}/${{ matrix.executable }} --gui
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: yaoyin-0.2.0-${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: yaoyin-0.2.0-*
+          merge-multiple: true
+          path: release
+      - name: Verify complete set and generate SHA256SUMS
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 packaging/release.py release --tag "$RELEASE_TAG"
+      - name: Publish complete draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > draft-state.txt 2>/dev/null; then
+            test "$(cat draft-state.txt)" = true || { echo 'Refusing to overwrite a published release'; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "药引 $RELEASE_TAG" --notes-file packaging/RELEASE-NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false

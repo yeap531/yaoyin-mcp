@@ -8,6 +8,8 @@ import sys
 import unittest
 from unittest import mock
 
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+
 spec = importlib.util.spec_from_file_location('yaoyin_entry',
     Path(__file__).resolve().parents[1] / 'entry_hook.py')
 entry = importlib.util.module_from_spec(spec)
@@ -75,7 +77,7 @@ class EntryTests(unittest.TestCase):
             self.assertEqual(entry.call_mcp(task), content)
         command = popen.call_args.args[0]
         self.assertNotIn(task, json.dumps(command))
-        self.assertEqual(popen.call_args.kwargs['env'], {'PATH':'/usr/bin:/bin','LANG':'en_US.UTF-8'})
+        self.assertFalse(set(popen.call_args.kwargs['env']) & {'ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','OPENAI_API_KEY','HTTPS_PROXY','NO_PROXY'})
         requests = [json.loads(line) for line in process.communicate.call_args.args[0].splitlines()]
         self.assertEqual(requests[-1]['params']['arguments']['messages'], [{'role':'user','content':task}])
         self.assertEqual(command[-1], '--handoff')

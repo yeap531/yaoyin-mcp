@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import runtime
 
 
 PERIOD = 300
@@ -17,8 +18,10 @@ MAX_HANDOFF = 262144
 
 
 def ask_task():
-    if sys.platform != 'darwin':
-        raise RuntimeError('本地输入入口目前仅支持 macOS')
+    if getattr(sys, 'frozen', False) or sys.platform != 'darwin':
+        import gui
+        return gui.ask_task(timeout=120)
+    # 保留系统 Python 的 macOS 入口；系统自带的旧 Tk 可能无法启动。
     script = '''set response to display dialog "在此输入任务。提交后先交给药引，满 5 分钟再交接原会话。请勿填写密钥。" with title "药引" default answer "" buttons {"取消", "提交"} default button "提交" cancel button "取消" giving up after 120
 if gave up of response then error number -128
 return text returned of response'''
@@ -37,17 +40,16 @@ def call_mcp(task):
     requests = [
         {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
             'protocolVersion': '2025-06-18', 'capabilities': {},
-            'clientInfo': {'name': 'yaoyin-local-entry', 'version': '0.1.0'}}},
+            'clientInfo': {'name': 'yaoyin-local-entry', 'version': runtime.VERSION}}},
         {'jsonrpc': '2.0', 'method': 'notifications/initialized'},
         {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {
             'name': 'ask_model', 'arguments': {
                 'messages': [{'role': 'user', 'content': task}], 'max_output_tokens': 8192}}},
     ]
     data = ''.join(json.dumps(item, ensure_ascii=False) + '\n' for item in requests).encode()
-    server = Path(__file__).resolve().with_name('server.py')
-    process = subprocess.Popen([sys.executable, '-B', str(server), '--handoff'],
+    process = subprocess.Popen(runtime.command('mcp', '--handoff'),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        start_new_session=True, env={'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8'})
+        start_new_session=(os.name != 'nt'), env=runtime.child_env())
     try:
         output, _ = process.communicate(data, timeout=310)
         if process.returncode:
@@ -114,11 +116,11 @@ def cancel(signum, frame):
     raise KeyboardInterrupt
 
 
-def main():
+def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description='药引本地输入入口')
     parser.add_argument('--client', choices=['codex', 'claude'], required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     signal.signal(signal.SIGTERM, cancel)
     signal.signal(signal.SIGINT, cancel)
     try:
