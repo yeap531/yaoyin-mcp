@@ -122,7 +122,7 @@ class UnixStorageTests(StorageFixture, unittest.TestCase):
                 with self.assertRaises(PermissionError):
                     storage.write_config({'api_key': 'new-fake-key'}, self.path)
                 self.assertEqual(stat.S_IMODE(target.stat().st_mode), unsafe)
-                self.assertEqual(json.loads(self.path.read_text()), self.config)
+                self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), self.config)
                 self.assertEqual(list(self.path.parent.glob('.yaoyin-config-*')), [])
                 target.chmod(safe)
 
@@ -191,7 +191,7 @@ class WindowsStorageTests(StorageFixture, unittest.TestCase):
                         storage.check_private(self.path)
                     with self.assertRaises(PermissionError):
                         storage.write_config({'api_key': 'new-fake-key'}, self.path)
-                    self.assertEqual(json.loads(self.path.read_text()), self.config)
+                    self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), self.config)
                     self.assertEqual(list(self.path.parent.glob('.yaoyin-config-*')), [])
                 finally:
                     self.set_acl(target, original)
