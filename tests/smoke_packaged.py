@@ -39,6 +39,13 @@ def smoke_shell_hooks(executable, environment, directory):
                                 env=environment, cwd=directory, timeout=30, check=True)
         if json.loads(result.stdout) != {}:
             raise AssertionError(f'{client} hook changed a non-trigger event: {result.stdout!r}')
+        blocked = json.dumps({'hook_event_name':'UserPromptSubmit',
+                              'prompt':'$yaoyin 此处不应填写正文 λ'}, ensure_ascii=False)
+        result = subprocess.run(command, input=blocked, capture_output=True, encoding='utf-8',
+                                env=environment, cwd=directory, timeout=30, check=True)
+        response = json.loads(result.stdout)
+        if response.get('decision') != 'block' or '药引隐私入口' not in response.get('reason',''):
+            raise AssertionError(f'{client} hook did not preserve UTF-8 output')
 
 
 def smoke(executable, gui=False):

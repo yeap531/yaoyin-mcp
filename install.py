@@ -22,7 +22,9 @@ def hook_settings(client, entry):
     result = {'type': 'command', 'command': shlex.join(command), 'timeout': 460,
               'statusMessage': '药引本地输入与定时交接', 'additionalContextLimit': 0}
     if os.name == 'nt':
-        result['commandWindows'] = '& ' + ' '.join("'" + item.replace("'", "''") + "'" for item in command)
+        invoke = '& ' + ' '.join("'" + item.replace("'", "''") + "'" for item in command)
+        result['commandWindows'] = ('& { $OutputEncoding = [Console]::OutputEncoding = '
+            '[System.Text.UTF8Encoding]::new($false); ' + invoke + ' }')
     return result
 
 
