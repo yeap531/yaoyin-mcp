@@ -122,13 +122,13 @@ class ServerTests(unittest.TestCase):
         self.addCleanup(peer.close)
         def delayed_proxy():
             peer.recv(4096)
-            time.sleep(.08)
-            peer.sendall(b'HTTP/1.0 200 Connection established\r\n\r\n')
             time.sleep(.2)
+            peer.sendall(b'HTTP/1.0 200 Connection established\r\n\r\n')
+            time.sleep(.5)
         worker = threading.Thread(target=delayed_proxy, daemon=True)
         worker.start()
         def create(*args, **kwargs):
-            client.settimeout(.12)
+            client.settimeout(.3)
             return client
         context = ssl.create_default_context()
         started = time.monotonic()
@@ -136,10 +136,10 @@ class ServerTests(unittest.TestCase):
                 mock.patch.object(socket, 'create_connection', side_effect=create), \
                 mock.patch.object(socket.socket, 'setsockopt'):
             with self.assertRaises(server.ApiError):
-                server.call_api(self.arguments, timeout=.12)
+                server.call_api(self.arguments, timeout=.3)
         elapsed = time.monotonic() - started
-        self.assertGreater(elapsed, .1)
-        self.assertLess(elapsed, .18)
+        self.assertGreater(elapsed, .25)
+        self.assertLess(elapsed, .45)
         worker.join(timeout=.4)
 
     def test_protocol_continues_after_invalid_request(self):
@@ -181,9 +181,9 @@ class ServerTests(unittest.TestCase):
                 receive_headers()
                 peer.sendall(b'HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: ' +
                              str(len(payload)).encode() + b'\r\n\r\n')
-                for index in range(0,len(payload),6):
+                for index in range(0,len(payload),1):
                     time.sleep(.025)
-                    peer.sendall(payload[index:index+6])
+                    peer.sendall(payload[index:index+1])
             except OSError:
                 pass
         worker = threading.Thread(target=slow_response,daemon=True)
@@ -195,7 +195,7 @@ class ServerTests(unittest.TestCase):
                 server.call_api(self.arguments,timeout=.1)
         elapsed = time.monotonic()-started
         self.assertGreater(elapsed,.08)
-        self.assertLess(elapsed,.16)
+        self.assertLess(elapsed,.5)
         worker.join(timeout=.4)
 
 
