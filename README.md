@@ -2,7 +2,7 @@
 
 让自有模型先处理任务，Codex 或 Claude Code 在原会话中继续完成。本地 `stdio MCP`，不代理官方模型流量，不替换客户端的登录方式。
 
-当前提供手动工具调用，不包含自动触发、5 分钟计时或 `/model` 切换。外部模型只生成文本结果；读写代码、运行命令仍由原客户端处理。
+提供配套 `yaoyin` skill：调用后先让自有模型处理任务，再由原客户端检查结果、继续执行并验证。也可单独手动调用 MCP。Skill 不强制接管所有消息，不包含精确 5 分钟计时或 `/model` 切换。外部模型只生成文本结果；读写代码、运行命令仍由原客户端处理。
 
 ```text
 Codex / Claude Code 原会话
@@ -47,7 +47,13 @@ chmod 700 ~/.config/yaoyin-mcp
 python3 install.py --client both
 ```
 
-也可分别使用 `--client codex` 或 `--client claude`。安装器使用客户端原生 CLI 注册名为 `yaoyin` 的用户级 MCP，执行入口是当前 Python 和本目录的 `server.py`，因此安装后请保留源码目录。它不安装全局软件，不改模型供应商、官方登录或工具审批规则；遇到已有的不同同名配置会停止。
+也可分别使用 `--client codex` 或 `--client claude`。安装器使用客户端原生 CLI 注册名为 `yaoyin` 的用户级 MCP，并安装配套 skill。执行入口是当前 Python 和本目录的 `server.py`，skill 目录链接到本仓库的 `skills/yaoyin`，因此安装后请保留源码目录。它不安装全局软件，不改模型供应商、官方登录或工具审批规则；遇到已有的不同同名 MCP 或 skill 配置会停止。
+
+已经接好 MCP 时，只补装 skill：
+
+```sh
+python3 install.py --client both --skills-only
+```
 
 两边的单工具超时均设为 130 秒，略长于服务内部的 120 秒 API 请求限制。Codex 的这项设置只写入 `[mcp_servers.yaoyin]`；Claude Code 使用该服务独立的 `timeout` 字段。
 
@@ -58,11 +64,16 @@ codex mcp get yaoyin --json
 claude mcp get yaoyin
 ```
 
-在客户端新会话中用 `/mcp` 检查连接，然后让它调用 `yaoyin` 的 `ask_model`，例如：
+在客户端新会话中用 `/mcp` 检查连接，然后调用工作流 skill：
 
 ```text
-先用药引 MCP 分析这个问题，再根据它的结果继续完成任务。
+Codex：$yaoyin 帮我完成这个任务……
+Claude Code：/yaoyin 帮我完成这个任务……
 ```
+
+两端共用一份 `skills/yaoyin/SKILL.md`。Codex 同时链接到应用的技能目录 `~/.codex/skills/yaoyin`（自定义 `CODEX_HOME` 时随之变化）和标准发现目录 `~/.agents/skills/yaoyin`；Claude Code 使用 `~/.claude/skills/yaoyin`。这些入口均指向同一份源文件，不维护多份不同的流程。
+
+Skill 先原样发送任务与必要上下文，不把 skill 的工作流指令拼到外部模型输入中；取得结果后留在当前原生会话里执行和验证。它可被客户端根据描述自动选择，但 skill 不能保证每条普通消息都强制触发。工具不可用或 API 失败时会明确报告，不改用其他 API 或伪造阶段成果。
 
 已有会话是否能动态加载取决于客户端版本；无需登出官方账号。首次调用是否要求确认，遵循客户端原来的权限设置。
 
@@ -107,6 +118,8 @@ codex mcp remove yaoyin
 claude mcp remove --scope user yaoyin
 ```
 
-原生接入依据：[Codex MCP 文档](https://developers.openai.com/codex/mcp)、[Claude Code MCP 文档](https://code.claude.com/docs/en/mcp)。
+如需移除 skill，只删除对应发现目录中的 `yaoyin` 符号链接，保留仓库中的源文件。仅移除 MCP 连接不会自动移除 skill。
+
+原生接入依据：[Codex MCP 文档](https://developers.openai.com/codex/mcp)、[Claude Code MCP 文档](https://code.claude.com/docs/en/mcp)、[Codex skills 文档](https://developers.openai.com/codex/skills)、[Claude Code skills 文档](https://code.claude.com/docs/en/skills)。
 
 采用 MIT License。

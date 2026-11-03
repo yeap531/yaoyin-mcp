@@ -10,6 +10,30 @@ import subprocess
 import sys
 
 
+def skill_locations(client):
+    if client == 'claude':
+        return [Path.home() / '.claude/skills/yaoyin']
+    config_root = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex')))
+    return [config_root / 'skills/yaoyin', Path.home() / '.agents/skills/yaoyin']
+
+
+def check_skill_locations(clients, skill):
+    for client in clients:
+        for target in skill_locations(client):
+            if target.is_symlink() and target.resolve() == skill:
+                continue
+            if target.exists() or target.is_symlink():
+                raise RuntimeError('已有不同的同名 skill，未覆盖：' + str(target))
+
+
+def install_skill(client, skill):
+    for target in skill_locations(client):
+        if not target.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(skill, target_is_directory=True)
+    print(client + '：药引工作流 skill 已安装')
+
+
 def set_codex_timeout(path):
     before = path.read_text()
     header = re.search(r'(?m)^\[mcp_servers\.yaoyin\][ \t]*$', before)
@@ -48,6 +72,8 @@ def install(client, executable, server):
                                 capture_output=True, text=True)
         old = next((item for item in json.loads(result.stdout) if item['name'] == 'yaoyin'), None)
         if old:
+            if old.get('enabled') is False:
+                raise RuntimeError('Codex 的 yaoyin MCP 已被禁用，保留原设置；请先自行启用')
             transport = old.get('transport', {})
             if (transport.get('command') != sys.executable or
                     transport.get('args') != [str(server)] or transport.get('env')):
@@ -63,14 +89,19 @@ def install(client, executable, server):
 def main():
     parser = argparse.ArgumentParser(description='为 Codex / Claude Code 注册药引 MCP')
     parser.add_argument('--client', choices=['codex', 'claude', 'both'], default='both')
+    parser.add_argument('--skills-only', action='store_true', help='仅安装工作流 skill，保留已有 MCP 配置')
     args = parser.parse_args()
     server = Path(__file__).resolve().with_name('server.py')
+    skill = server.parent / 'skills/yaoyin'
     clients = ['codex', 'claude'] if args.client == 'both' else [args.client]
-    executables = {client: shutil.which(client) for client in clients}
+    check_skill_locations(clients, skill)
+    executables = {client: shutil.which(client) for client in clients} if not args.skills_only else {}
     if any(not executable for executable in executables.values()):
         parser.error('请先安装所选客户端的官方 CLI，并使其位于 PATH 中')
     for client in clients:
-        install(client, executables[client], server)
+        if not args.skills_only:
+            install(client, executables[client], server)
+        install_skill(client, skill)
 
 
 if __name__ == '__main__':
