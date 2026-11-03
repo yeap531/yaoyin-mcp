@@ -1,6 +1,6 @@
 # 便携包构建
 
-使用目标平台原生 Python 3.12.12 和 `requirements-build.txt`；所有依赖版本固定。
+使用目标平台原生 Python 3.13.17 和 `requirements-build.txt`；所有依赖版本固定。
 PyInstaller 的 Tk hook 收集 Tcl/Tk，spec 显式收集 certifi 与 Windows DACL 所需
 pywin32 模块。主体保留 console 模式，保证 MCP/hook 的 stdio；macOS `.app`
 只是调用同目录主体的配置入口，不作为 MCP command 使用。
@@ -33,3 +33,5 @@ macOS 未签名/公证，Windows 未签名。不能将 CI 结果描述成这些�
 - [GitHub 原生 runner 标签与架构](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)
 - [GitHub runner 镜像](https://github.com/actions/runner-images)
 - [setup-python 固定 Python patch 版本](https://github.com/actions/setup-python/blob/main/docs/advanced-usage.md)
+
+发布 tag 只复用同一提交已成功的 main 原生构建制品，不重新编译；找不到成功记录或五包不完整时拒绝发布。

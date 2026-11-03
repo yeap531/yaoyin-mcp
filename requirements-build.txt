@@ -1,4 +1,4 @@
-# Python 3.12.12；直接与传递构建依赖均固定版本。
+# Python 3.13.17；直接与传递构建依赖均固定版本。
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.9
 altgraph==0.17.5

@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   build:
+    if: "!startsWith(github.ref, 'refs/tags/')"
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -52,7 +53,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y python3-tk tk-dev xvfb xauth
       - uses: actions/setup-python@v7.1.0
         with:
-          python-version: '3.12.12'
+          python-version: '3.13.17'
           architecture: ${{ matrix.architecture }}
           cache: pip
           cache-dependency-path: requirements-build.txt
@@ -84,18 +85,33 @@ jobs:
           retention-days: 14
 
   release:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+      - name: Find successful native build for this exact commit
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA=$(git rev-parse HEAD)
+          RUN_ID=$(gh api "repos/$GH_REPO/actions/workflows/portable.yml/runs?head_sha=$SOURCE_SHA&status=completed&per_page=30" --jq '[.workflow_runs[] | select(.event=="push" and .head_branch=="main" and .conclusion=="success")][0].id')
+          test "$RUN_ID" != null && test -n "$RUN_ID" || { echo 'No successful main build for this commit'; exit 1; }
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8.0.2
         with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
           pattern: yaoyin-0.2.0-*
           merge-multiple: true
           path: release
